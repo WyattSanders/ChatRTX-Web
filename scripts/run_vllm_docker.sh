@@ -11,6 +11,12 @@ MODEL="${1:-${LLM_MODEL:-Qwen/Qwen2.5-3B-Instruct}}"
 VLLM_PORT="${VLLM_PORT:-8001}"
 VLLM_CONTAINER_NAME="${VLLM_CONTAINER_NAME:-vllm-openai}"
 HF_CACHE_DIR="${HF_CACHE_DIR:-${PROJECT_DIR}/hf-cache}"
+HF_TOKEN="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
+VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-2048}"
+VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.95}"
+VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"
+VLLM_SWITCH_WAIT_FOR_GPU_MEM_BELOW_MIB="${VLLM_SWITCH_WAIT_FOR_GPU_MEM_BELOW_MIB:-1500}"
+VLLM_SWITCH_WAIT_TIMEOUT_S="${VLLM_SWITCH_WAIT_TIMEOUT_S:-45}"
 
 echo "Starting vLLM OpenAI server:"
 echo "  model: ${MODEL}"
@@ -24,16 +30,35 @@ mkdir -p "${HF_CACHE_DIR}"
 
 docker rm -f "${VLLM_CONTAINER_NAME}" >/dev/null 2>&1 || true
 
+# Best-effort wait for GPU memory to clear after container stop (avoids OOM on rapid switches)
+if command -v nvidia-smi >/dev/null 2>&1; then
+  start_ts=$(date +%s)
+  while true; do
+    used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -n 1 || echo "")
+    if [[ -n "${used}" ]] && [[ "${used}" -le "${VLLM_SWITCH_WAIT_FOR_GPU_MEM_BELOW_MIB}" ]]; then
+      break
+    fi
+    now=$(date +%s)
+    if [[ $((now - start_ts)) -ge "${VLLM_SWITCH_WAIT_TIMEOUT_S}" ]]; then
+      break
+    fi
+    sleep 1
+  done
+fi
+
 docker run -d --name "${VLLM_CONTAINER_NAME}" \
   --gpus all \
   --ipc=host \
   -p "${VLLM_PORT}:8000" \
   -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
+  ${HF_TOKEN:+-e HF_TOKEN="${HF_TOKEN}"} \
+  ${HF_TOKEN:+-e HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"} \
   vllm/vllm-openai:latest \
   --model "${MODEL}" \
   --host 0.0.0.0 --port 8000 \
-  --gpu-memory-utilization 0.90 \
-  --max-model-len 4096
+  --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION}" \
+  --max-model-len "${VLLM_MAX_MODEL_LEN}" \
+  --max-num-seqs "${VLLM_MAX_NUM_SEQS}"
 
 echo "Container started. Tail logs with:"
 echo "  docker logs -f ${VLLM_CONTAINER_NAME}"

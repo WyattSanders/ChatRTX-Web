@@ -13,16 +13,17 @@ This is a small **self-hosted RAG web app** for Linux servers.
 - **Model selection is allowlisted**:
   - Configure allowed models via `MODEL_CATALOG`.
   - The web UI can “Download & Activate” a model by restarting the configured vLLM docker container.
+  - Note: larger models (e.g. 12B) may require more VRAM and/or quantized variants to start successfully.
 - The web UI **does not display** server filesystem paths or LLM endpoint URLs.
 
 ## Quick start
 
 ### 1) Create a Python env (recommended: conda, Python 3.11)
 
-Your system Python is 3.13, which breaks many ML deps. Use the provided `environment.yml`:
+If your system Python is 3.13, many ML deps will not install cleanly. Use the provided `environment.yml`:
 
 ```bash
-cd /path/to/ChatRTX/rag-webapp
+cd /path/to/ChatRTX-Web
 conda env create -f environment.yml
 conda activate rag-webapp
 ```
@@ -30,7 +31,7 @@ conda activate rag-webapp
 ### 2) Run the web app
 
 ```bash
-cd /path/to/ChatRTX/rag-webapp
+cd /path/to/ChatRTX-Web
 uvicorn rag_webapp.main:app --host 0.0.0.0 --port 8080
 ```
 
@@ -48,15 +49,26 @@ Set environment variables (or create a local `.env` using `config.example.env` a
   - `LLM_MODEL`: active model name
   - `VLLM_PORT`: if using the provided vLLM script (defaults to `8001`)
   - `LLM_BASE_URL`: only needed if you are not using the default `http://127.0.0.1:${VLLM_PORT}/v1`
+- **Hugging Face auth (optional)**:
+  - `HF_TOKEN`: required for gated/private Hugging Face models (do not commit the real token)
+ - **Model switching (GPU memory cleanup)**:
+   - When switching models, the server stops the previous vLLM container and waits briefly for GPU memory to clear before starting the next model.
+   - You can tune this with:
+     - `VLLM_SWITCH_WAIT_FOR_GPU_MEM_BELOW_MIB` (default `1500`)
+     - `VLLM_SWITCH_WAIT_TIMEOUT_S` (default `45`)
 
 ## Recommended: run a local GPU LLM server (vLLM) in Docker
+
+Cross-platform note:
+- The scripts in `scripts/` are bash + Linux-focused. On Windows, use WSL2 or run the commands manually.
+- macOS Docker does not support NVIDIA GPUs; use a remote GPU host or a CPU-compatible OpenAI endpoint.
 
 ### 0) One-time: enable NVIDIA GPU access in Docker (Ubuntu host)
 
 Your host needs **NVIDIA Container Toolkit**. If `nvidia-container-cli` is missing, run:
 
 ```bash
-cd /path/to/ChatRTX/rag-webapp
+cd /path/to/ChatRTX-Web
 sudo bash scripts/install_nvidia_container_toolkit.sh
 ```
 
@@ -65,7 +77,7 @@ This script also runs a quick GPU validation container: `nvidia/cuda ... nvidia-
 ### 1) Start vLLM (OpenAI-compatible)
 
 ```bash
-cd /path/to/ChatRTX/rag-webapp
+cd /path/to/ChatRTX-Web
 bash scripts/run_vllm_docker.sh Qwen/Qwen2.5-3B-Instruct
 ```
 
@@ -87,8 +99,16 @@ curl http://127.0.0.1:8001/v1/models
 At minimum, you can run the web app with:
 
 ```bash
-cd /path/to/ChatRTX/rag-webapp
+cd /path/to/ChatRTX-Web
 bash scripts/environment.sh
+```
+
+Notes:
+- `scripts/environment.sh` is bash-only and assumes your conda env is already activated.
+- For Windows or PowerShell, run:
+```bash
+cd /path/to/ChatRTX-Web
+python -m uvicorn rag_webapp.main:app --host 0.0.0.0 --port 8080
 ```
 
 ## Ingest documents

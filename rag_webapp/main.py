@@ -16,7 +16,8 @@ from rag_webapp.rag import ingest as ingest_docs
 from rag_webapp.rag import retrieve
 from rag_webapp.settings import get_settings
 from rag_webapp.state import get_active_model, set_active_model
-from rag_webapp.vllm_docker import StartConfig, docker_available, start_vllm_openai
+from rag_webapp.model_progress import classify_failure, parse_download_progress, tail_container_logs
+from rag_webapp.vllm_docker import StartConfig, container_running, docker_available, start_vllm_openai
 
 
 app = FastAPI(title="ChatRTX Web", version="0.2.0")
@@ -76,6 +77,17 @@ class ModelSelectResponse(BaseModel):
     active_model: str
     ready: bool
     message: str | None = None
+
+
+class ModelProgressResponse(BaseModel):
+    ok: bool
+    active_model: str
+    stage: str  # "downloading" | "starting" | "ready" | "unknown"
+    pct: int | None = None
+    done_bytes: int | None = None
+    total_bytes: int | None = None
+    eta: str | None = None
+    error: str | None = None
 
 
 def _active_model() -> str:
@@ -200,6 +212,52 @@ async def api_models_status() -> ModelStatusResponse:
         return ModelStatusResponse(ok=False, active_model=active, ready=False)
 
 
+@app.get("/api/models/progress", response_model=ModelProgressResponse)
+async def api_models_progress() -> ModelProgressResponse:
+    """
+    Best-effort progress/ETA for model download/startup.
+    We intentionally avoid returning server paths or raw docker logs.
+    """
+    active = _active_model()
+    if not docker_available():
+        return ModelProgressResponse(ok=False, active_model=active, stage="unknown")
+
+    logs = tail_container_logs(settings.vllm_container_name, tail=800)
+    p = parse_download_progress(logs)
+    failure = classify_failure(logs)
+
+    # If the model is served and matches active, we're ready.
+    try:
+        models = await llm.list_models()
+        served = models[0] if models else ""
+        if served and served == active:
+            return ModelProgressResponse(ok=True, active_model=active, stage="ready")
+    except Exception:
+        pass
+
+    # If we have a download line, call it downloading.
+    if p.pct is not None and p.total_bytes and p.total_bytes > 0:
+        return ModelProgressResponse(
+            ok=True,
+            active_model=active,
+            stage="downloading",
+            pct=p.pct,
+            done_bytes=p.done_bytes,
+            total_bytes=p.total_bytes,
+            eta=p.eta,
+        )
+
+    # If the container is not running and we can classify a failure, surface it.
+    if not container_running(settings.vllm_container_name) and failure:
+        return ModelProgressResponse(ok=False, active_model=active, stage="unknown", error=failure)
+
+    # Otherwise, if the container is running but not serving yet, it's starting.
+    if container_running(settings.vllm_container_name):
+        return ModelProgressResponse(ok=True, active_model=active, stage="starting")
+
+    return ModelProgressResponse(ok=False, active_model=active, stage="unknown")
+
+
 @app.post("/api/models/select", response_model=ModelSelectResponse)
 async def api_models_select(req: ModelSelectRequest) -> ModelSelectResponse:
     if not settings.model_catalog:
@@ -224,6 +282,12 @@ async def api_models_select(req: ModelSelectRequest) -> ModelSelectResponse:
                 port=settings.vllm_port,
                 hf_cache_dir=settings.hf_cache_dir,
                 model=model,
+                gpu_memory_utilization=settings.vllm_gpu_memory_utilization,
+                max_model_len=settings.vllm_max_model_len,
+                max_num_seqs=settings.vllm_max_num_seqs,
+                hf_token=settings.hf_token,
+                switch_wait_for_gpu_mem_below_mib=settings.vllm_switch_wait_for_gpu_mem_below_mib,
+                switch_wait_timeout_s=settings.vllm_switch_wait_timeout_s,
             )
         )
     except Exception:

@@ -26,6 +26,12 @@ class Settings:
     vllm_container_name: str
     vllm_port: int
     hf_cache_dir: str
+    vllm_gpu_memory_utilization: float
+    vllm_max_model_len: int
+    vllm_max_num_seqs: int
+    hf_token: str | None
+    vllm_switch_wait_for_gpu_mem_below_mib: int
+    vllm_switch_wait_timeout_s: int
 
     chunk_size: int
     chunk_overlap: int
@@ -38,6 +44,13 @@ def _csv(name: str) -> list[str]:
         return []
     parts = [p.strip() for p in v.replace("\n", ",").split(",")]
     return [p for p in parts if p]
+
+
+def _float(name: str, default: float) -> float:
+    v = os.getenv(name)
+    if v is None or v == "":
+        return default
+    return float(v)
 
 
 def get_settings() -> Settings:
@@ -62,7 +75,13 @@ def get_settings() -> Settings:
         model_catalog=_csv("MODEL_CATALOG"),
         vllm_container_name=(os.getenv("VLLM_CONTAINER_NAME") or "vllm-openai"),
         vllm_port=vllm_port,
-        hf_cache_dir=(os.getenv("HF_CACHE_DIR") or "/home/wyatt/hf-cache"),
+        hf_cache_dir=(os.getenv("HF_CACHE_DIR") or "./hf-cache"),
+        hf_token=(os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN") or "").strip() or None,
+        vllm_gpu_memory_utilization=_float("VLLM_GPU_MEMORY_UTILIZATION", 0.95),
+        vllm_max_model_len=_int("VLLM_MAX_MODEL_LEN", 2048),
+        vllm_max_num_seqs=_int("VLLM_MAX_NUM_SEQS", 1),
+        vllm_switch_wait_for_gpu_mem_below_mib=_int("VLLM_SWITCH_WAIT_FOR_GPU_MEM_BELOW_MIB", 1500),
+        vllm_switch_wait_timeout_s=_int("VLLM_SWITCH_WAIT_TIMEOUT_S", 45),
         chunk_size=_int("CHUNK_SIZE", 900),
         chunk_overlap=_int("CHUNK_OVERLAP", 150),
         top_k=_int("TOP_K", 5),

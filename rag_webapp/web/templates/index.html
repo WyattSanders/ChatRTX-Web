@@ -280,6 +280,19 @@
       .smallbtn:hover { background: rgba(255,255,255,0.09); }
       .smallbtn:disabled { opacity: 0.55; cursor: not-allowed; }
       .status { margin-top: 10px; color: var(--muted); font-size: 13px; white-space: pre-wrap; }
+      .bar {
+        height: 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(255,255,255,0.12);
+        background: rgba(255,255,255,0.04);
+        overflow: hidden;
+        margin-top: 10px;
+      }
+      .bar > div {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, rgba(118,185,0,0.55), rgba(118,185,0,0.95));
+      }
       .hidden { display: none !important; }
     </style>
   </head>
@@ -368,6 +381,7 @@
             <button id="modelApplyBtn" class="smallbtn">Download & Activate</button>
           </div>
           <div id="modelStatus" class="status"></div>
+          <div class="bar"><div id="modelBar"></div></div>
 {% else %}
           <div class="status" style="margin-top: 0;">Model selection is disabled on this server.</div>
 {% endif %}
@@ -491,6 +505,7 @@
       const modelSelect = el("modelSelect");
       const modelApplyBtn = el("modelApplyBtn");
       const modelStatus = el("modelStatus");
+      const modelBar = el("modelBar");
 
       async function refreshModelCatalog() {
         const r = await fetch("/api/models/catalog");
@@ -533,14 +548,38 @@
           const data = await r.json();
           if (!r.ok) throw new Error(data.detail || "Failed to start model");
           modelStatus.textContent = data.message || "Model is starting…";
-          // poll until ready
-          for (let i = 0; i < 120; i++) {
+          // poll progress until ready
+          for (let i = 0; i < 240; i++) {
             await new Promise((res) => setTimeout(res, 2000));
-            const s = await fetch("/api/models/status").then((x) => x.json()).catch(() => null);
-            if (s) {
-              if (s.active_model && modelName) modelName.textContent = s.active_model;
-              if (s.ok && s.ready) { modelStatus.textContent = `Active model: ${s.active_model} (ready)`; break; }
-              if (s.ok) { modelStatus.textContent = `Active model: ${s.active_model} (starting…)`; }
+            const prog = await fetch("/api/models/progress").then((x) => x.json()).catch(() => null);
+            if (prog) {
+              if (prog.active_model && modelName) modelName.textContent = prog.active_model;
+              if (prog.stage === "ready") {
+                modelStatus.textContent = `Active model: ${prog.active_model} (ready)`;
+                if (modelBar) modelBar.style.width = "100%";
+                break;
+              }
+              if (prog.error) {
+                if (prog.error === "insufficient_vram") {
+                  modelStatus.textContent = "FAILED: Not enough GPU memory for this model/settings. Try a smaller/quantized model, or lower VLLM_MAX_MODEL_LEN.";
+                } else if (prog.error === "auth_required") {
+                  modelStatus.textContent = "FAILED: This model requires Hugging Face authentication / access approval. Configure an HF token on the server.";
+                } else {
+                  modelStatus.textContent = "FAILED: Model start failed. Check server logs.";
+                }
+                if (modelBar) modelBar.style.width = "0%";
+                break;
+              }
+              if (prog.stage === "downloading") {
+                const pct = (prog.pct ?? 0);
+                const eta = prog.eta ? ` • ETA ${prog.eta}` : "";
+                modelStatus.textContent = `Downloading model… ${pct}%${eta}`;
+                if (modelBar) modelBar.style.width = `${pct}%`;
+              } else if (prog.stage === "starting") {
+                modelStatus.textContent = `Starting model…`;
+              } else {
+                modelStatus.textContent = `Model server unavailable`;
+              }
             }
           }
           await refreshLLMHealth();

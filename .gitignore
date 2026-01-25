@@ -201,6 +201,14 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# Local data and generated indices
+data/*.jsonl
+data/*.faiss
+
+# Environment files (keep example)
+*.env
+!config.example.env
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
