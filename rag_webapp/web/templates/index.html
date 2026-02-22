@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>ChatRTX Web</title>
+    <title>{{ app_title }}</title>
     <style>
       :root {
         --bg: #070a0f;
@@ -42,7 +42,7 @@
         margin: 0 auto;
         padding: 14px 18px;
         display: grid;
-        grid-template-columns: 1fr 1fr 40px;
+        grid-template-columns: 1fr 1fr auto;
         gap: 14px;
         align-items: center;
       }
@@ -299,9 +299,9 @@
   <body>
     <div class="topbar">
       <div class="topbar-inner">
-        <div class="brand" title="ChatRTX Web">
+        <div class="brand" title="{{ app_title }}">
           <div class="brand-badge"></div>
-          <div>ChatRTX Web</div>
+          <div>{{ app_title }}</div>
         </div>
 
         <div class="kv">
@@ -313,6 +313,9 @@
 
         <button id="refreshBtn" class="icon-btn" title="Refresh status">
           ⟳
+        </button>
+        <button id="clearChatBtn" class="icon-btn" title="Clear chat" style="font-size:15px;">
+          ✕
         </button>
       </div>
     </div>
@@ -334,8 +337,8 @@
                 <path d="M12 9.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6Z" stroke="rgba(214,255,170,0.95)" stroke-width="1.7"/>
               </svg>
             </div>
-            <p class="hero-title">ChatRTX Web: Your Personalized AI Chatbot</p>
-            <p class="hero-sub">By default, ingest a folder of documents and ask questions with citations.</p>
+            <p class="hero-title">{{ app_title }}</p>
+            <p class="hero-sub">Ingest company documents and ask questions with citations. Supported: .txt, .md, .pdf, .docx</p>
 
             <div class="chips">
               <button class="chip" data-q="Summarize the key points in the ingested documents.">Summarize the key points in my documents</button>
@@ -357,13 +360,14 @@
 
       <div class="drawer">
         <div class="drawer-h">
-          <div class="drawer-title">Data</div>
-          <div class="mono" style="color: var(--muted2); font-size: 12px;"></div>
+          <div class="drawer-title">Data Library</div>
+          <div id="indexStats" class="mono" style="color: var(--muted2); font-size: 12px;"></div>
         </div>
         <div class="drawer-body">
-          <div class="row">
+          <div class="row" style="grid-template-columns: 1fr 140px 120px;">
             <div class="status" style="margin-top: 0;">Library updates are managed by the server.</div>
             <button id="ingestBtn" class="smallbtn">Update Library</button>
+            <button id="clearIndexBtn" class="smallbtn" style="border-color: rgba(253,164,175,0.35); color: var(--danger);">Clear Library</button>
           </div>
           <div id="ingestStatus" class="status"></div>
         </div>
@@ -396,11 +400,18 @@
       const llmDot = el("llmDot");
       const llmSummary = el("llmSummary");
       const refreshBtn = el("refreshBtn");
+      const clearChatBtn = el("clearChatBtn");
       const modelName = el("modelName");
 
       function ensureChatVisible() {
         hero.classList.add("hidden");
         chat.classList.remove("hidden");
+      }
+
+      function clearChat() {
+        chat.innerHTML = "";
+        chat.classList.add("hidden");
+        hero.classList.remove("hidden");
       }
 
       function addMsg(role, text, meta) {
@@ -409,7 +420,7 @@
         row.className = "msg";
         const av = document.createElement("div");
         av.className = "avatar " + role;
-        av.textContent = role === "user" ? "Y" : "N";
+        av.textContent = role === "user" ? "Y" : "A";
 
         const content = document.createElement("div");
         content.className = "content";
@@ -427,6 +438,15 @@
         chat.scrollTop = chat.scrollHeight;
       }
 
+      async function refreshIndexStats() {
+        try {
+          const r = await fetch("/api/index/stats");
+          const data = await r.json();
+          const statsEl = el("indexStats");
+          if (statsEl) statsEl.textContent = `${data.documents} docs • ${data.chunks} chunks`;
+        } catch (_) {}
+      }
+
       async function ingest() {
         el("ingestBtn").disabled = true;
         el("ingestStatus").textContent = "Ingesting…";
@@ -438,10 +458,31 @@
           const data = await r.json();
           if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
           el("ingestStatus").textContent = `OK: files_seen=${data.files_seen}, chunks_added=${data.chunks_added}`;
+          await refreshIndexStats();
         } catch (e) {
           el("ingestStatus").textContent = "ERROR: " + e.message;
         } finally {
           el("ingestBtn").disabled = false;
+        }
+      }
+
+      async function clearIndex() {
+        if (!confirm("Clear the search index? Source documents on the server will NOT be deleted. You can re-ingest them at any time.")) return;
+        el("clearIndexBtn").disabled = true;
+        el("ingestStatus").textContent = "Clearing library…";
+        try {
+          const r = await fetch("/api/index/clear", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"}
+          });
+          const data = await r.json();
+          if (!r.ok) throw new Error(data.detail || JSON.stringify(data));
+          el("ingestStatus").textContent = "Library cleared.";
+          await refreshIndexStats();
+        } catch (e) {
+          el("ingestStatus").textContent = "ERROR: " + e.message;
+        } finally {
+          el("clearIndexBtn").disabled = false;
         }
       }
 
@@ -592,9 +633,11 @@
 {% endif %}
 
       el("ingestBtn").addEventListener("click", ingest);
+      el("clearIndexBtn").addEventListener("click", clearIndex);
       el("askBtn").addEventListener("click", ask);
       el("q").addEventListener("keydown", (e) => { if (e.key === "Enter") ask(); });
       refreshBtn.addEventListener("click", refreshLLMHealth);
+      clearChatBtn.addEventListener("click", clearChat);
 {% if model_mgmt_enabled %}
       modelApplyBtn.addEventListener("click", applyModel);
       refreshModelCatalog()
@@ -602,6 +645,9 @@
         .catch((e) => { modelStatus.textContent = "ERROR: " + e.message; });
 {% endif %}
       refreshLLMHealth();
+      refreshIndexStats();
+      // Auto-refresh LLM health every 30 seconds
+      setInterval(refreshLLMHealth, 30000);
     </script>
   </body>
 </html>

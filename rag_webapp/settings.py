@@ -37,6 +37,8 @@ class Settings:
     chunk_overlap: int
     top_k: int
 
+    app_title: str
+
 
 def _csv(name: str) -> list[str]:
     v = os.getenv(name)
@@ -85,5 +87,6 @@ def get_settings() -> Settings:
         chunk_size=_int("CHUNK_SIZE", 900),
         chunk_overlap=_int("CHUNK_OVERLAP", 150),
         top_k=_int("TOP_K", 5),
+        app_title=(os.getenv("APP_TITLE") or "Company Knowledge Base").strip(),
     )
 

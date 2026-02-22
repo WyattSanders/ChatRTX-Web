@@ -41,6 +41,8 @@ Then open `http://<server-ip>:8080`.
 
 Set environment variables (or create a local `.env` using `config.example.env` as a template):
 
+- **App branding**:
+  - `APP_TITLE`: display name shown in the browser tab and header (default: `Company Knowledge Base`)
 - **Required for ingestion**:
   - `INGEST_SOURCE_PATH`: absolute path to the server-side documents folder (end users cannot change it)
 - **Recommended for model selection**:
@@ -120,5 +122,5 @@ Note: ingestion runs against the server-configured `INGEST_SOURCE_PATH`.
 ## Notes
 
 - Index data is stored under `./data/` by default (configurable via `DATA_DIR`).
-- Supported files: `.txt`, `.md`, `.pdf`.
+- Supported files: `.txt`, `.md`, `.pdf`, `.docx`.
 
