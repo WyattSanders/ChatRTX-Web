@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass
 
 from rag_webapp.chunking import chunk_text
 from rag_webapp.doc_loaders import LoadedDoc
 from rag_webapp.embeddings import embed_texts
 from rag_webapp.index_store import ChunkMeta, IndexStore
+from rag_webapp.settings import MAX_TOP_K
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -81,13 +85,19 @@ def retrieve(store: IndexStore, embed_model: str, query: str, top_k: int) -> lis
     index, metas = loaded
     if index.ntotal == 0 or not metas:
         return []
+    if index.ntotal != len(metas):
+        # Vector i must map to metas[i]; if the two files disagree (e.g. read
+        # mid-save), hits would be attributed to the wrong document.
+        logger.warning("Index/metadata size mismatch (%d vs %d); re-run ingestion", index.ntotal, len(metas))
+        return []
+    k = min(max(1, int(top_k)), MAX_TOP_K, index.ntotal)
 
     qv = embed_texts(embed_model, [query])
     if qv.size == 0:
         return []
     qv = store.normalize(qv)
 
-    scores, ids = index.search(qv.astype("float32"), top_k)
+    scores, ids = index.search(qv.astype("float32"), k)
     hit_ids = ids[0].tolist()
     hit_scores = scores[0].tolist()
 

@@ -4,6 +4,8 @@ import re
 import subprocess
 from dataclasses import dataclass
 
+from rag_webapp.vllm_docker import validate_container_name
+
 
 _TQDM_RE = re.compile(
     r"(?P<pct>\d+)%\|[^\|]*\|\s*(?P<done>\d+(?:\.\d+)?)"
@@ -37,7 +39,7 @@ def tail_container_logs(container_name: str, tail: int = 400) -> str:
     """
     try:
         r = subprocess.run(
-            ["docker", "logs", "--tail", str(tail), container_name],
+            ["docker", "logs", "--tail", str(int(tail)), validate_container_name(container_name)],
             check=False,
             text=True,
             capture_output=True,

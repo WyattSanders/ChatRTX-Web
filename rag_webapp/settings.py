@@ -6,6 +6,11 @@ import os
 from dotenv import load_dotenv
 
 
+# Upper bound for TOP_K: each hit is pasted into the prompt, so an unbounded
+# value would blow the model's context window.
+MAX_TOP_K = 50
+
+
 def _int(name: str, default: int) -> int:
     v = os.getenv(name)
     if v is None or v == "":
@@ -58,6 +63,24 @@ def _float(name: str, default: float) -> float:
     return float(v)
 
 
+def _validate(s: Settings) -> Settings:
+    """Fail at startup on settings that would otherwise misbehave silently."""
+    if s.chunk_size <= 0:
+        raise ValueError("CHUNK_SIZE must be > 0")
+    if not 0 <= s.chunk_overlap < s.chunk_size:
+        raise ValueError("CHUNK_OVERLAP must be >= 0 and < CHUNK_SIZE")
+    if not 1 <= s.top_k <= MAX_TOP_K:
+        raise ValueError(f"TOP_K must be between 1 and {MAX_TOP_K}")
+    if s.app_password:
+        # Basic auth splits "user:password" on the first colon, so a username
+        # containing one could never log in; a blank password is a typo, not a choice.
+        if not s.app_password.strip():
+            raise ValueError("APP_PASSWORD is set but blank; unset it to disable auth or set a real password")
+        if not s.app_username or ":" in s.app_username:
+            raise ValueError("APP_USERNAME must be non-empty and must not contain ':'")
+    return s
+
+
 def get_settings() -> Settings:
     # Reads from a local `.env` if you create one; otherwise from the process env.
     load_dotenv(override=False)
@@ -70,7 +93,7 @@ def get_settings() -> Settings:
     ingest_source_path = os.getenv("INGEST_SOURCE_PATH")
     if ingest_source_path is not None:
         ingest_source_path = ingest_source_path.strip() or None
-    return Settings(
+    return _validate(Settings(
         llm_base_url=(os.getenv("LLM_BASE_URL") or f"http://127.0.0.1:{vllm_port}/v1").rstrip("/"),
         llm_model=(os.getenv("LLM_MODEL") or "mistralai/Mistral-7B-Instruct-v0.3"),
         llm_api_key=(os.getenv("LLM_API_KEY") or "local"),
@@ -95,5 +118,5 @@ def get_settings() -> Settings:
         chunk_overlap=_int("CHUNK_OVERLAP", 150),
         top_k=_int("TOP_K", 5),
         app_title=(os.getenv("APP_TITLE") or "Company Knowledge Base").strip(),
-    )
+    ))
 
