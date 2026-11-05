@@ -95,3 +95,18 @@ class IndexStore:
         faiss.normalize_L2(x)
         return x
 
+    def stats(self) -> dict[str, int]:
+        """Return chunk count and approximate unique document count."""
+        loaded = self.load()
+        if loaded is None:
+            return {"chunks": 0, "documents": 0}
+        _, metas = loaded
+        unique_sources = len({m.source_path for m in metas})
+        return {"chunks": len(metas), "documents": unique_sources}
+
+    def clear(self) -> None:
+        """Delete the persisted index and metadata. Source documents are not affected."""
+        for path in (self.index_path, self.meta_path):
+            if path.exists():
+                path.unlink()
+

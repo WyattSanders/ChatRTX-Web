@@ -76,6 +76,15 @@ class IngestResponse(BaseModel):
     chunks_added: int
 
 
+class IndexStatsResponse(BaseModel):
+    chunks: int
+    documents: int
+
+
+class IndexClearResponse(BaseModel):
+    ok: bool
+
+
 class ChatRequest(BaseModel):
     question: str
 
@@ -139,6 +148,7 @@ async def index(request: Request) -> HTMLResponse:
         "index.html",
         {
             "request": request,
+            "app_title": settings.app_title,
             "llm_model": _active_model(),
             "data_label": "Managed by server",
             "ingest_enabled": bool(settings.ingest_source_path),
@@ -180,6 +190,18 @@ async def api_ingest() -> IngestResponse:
     finally:
         _ingest_lock.release()
     return IngestResponse(files_seen=res.files_seen, chunks_added=res.chunks_added)
+
+
+@app.get("/api/index/stats", response_model=IndexStatsResponse)
+async def api_index_stats() -> IndexStatsResponse:
+    stats = store.stats()
+    return IndexStatsResponse(chunks=stats["chunks"], documents=stats["documents"])
+
+
+@app.post("/api/index/clear", response_model=IndexClearResponse)
+async def api_index_clear() -> IndexClearResponse:
+    store.clear()
+    return IndexClearResponse(ok=True)
 
 
 @app.post("/api/chat", response_model=ChatResponse)

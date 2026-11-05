@@ -11,9 +11,10 @@ class RetrievedChunk:
     text: str
 
 
-SYSTEM_PROMPT = """You are a helpful assistant that answers questions using the provided context.
-If the context is insufficient, say so and ask a clarifying question.
-Always be concise and cite sources by filename (and page if provided)."""
+SYSTEM_PROMPT = """You are a helpful company knowledge base assistant that answers questions using the provided context documents.
+Answer accurately and concisely using only the information from the provided context.
+If the context is insufficient or the answer is not present, say so clearly and suggest what additional information might help.
+Always cite sources by filename (and page if provided) using the [N] notation matching the context numbers."""
 
 
 def build_user_prompt(question: str, chunks: list[RetrievedChunk]) -> str:

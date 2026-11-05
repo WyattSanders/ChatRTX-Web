@@ -5,6 +5,12 @@ from pathlib import Path
 
 from pypdf import PdfReader
 
+try:
+    from docx import Document as DocxDocument  # python-docx
+    _DOCX_AVAILABLE = True
+except ImportError:
+    _DOCX_AVAILABLE = False
+
 
 @dataclass(frozen=True)
 class LoadedDoc:
@@ -40,6 +46,13 @@ def load_file(p: Path) -> list[LoadedDoc]:
             if text.strip():
                 out.append(LoadedDoc(source_path=str(p), page=i + 1, text=text))
         return out
+    if ext == ".docx" and _DOCX_AVAILABLE:
+        doc = DocxDocument(str(p))
+        paragraphs = [para.text for para in doc.paragraphs if para.text.strip()]
+        text = "\n".join(paragraphs)
+        if text.strip():
+            return [LoadedDoc(source_path=str(p), page=None, text=text)]
+        return []
 
     return []
 

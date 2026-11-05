@@ -44,6 +44,8 @@ Then open `http://<server-ip>:8080`.
 
 Set environment variables (or create a local `.env` using `config.example.env` as a template):
 
+- **App branding**:
+  - `APP_TITLE`: display name shown in the browser tab and header (default: `Company Knowledge Base`)
 - **Required for ingestion**:
   - `INGEST_SOURCE_PATH`: absolute path to the server-side documents folder (end users cannot change it)
 - **Recommended for model selection**:
@@ -132,5 +134,5 @@ python -m pytest -q tests   # offline; sentence-transformers is stubbed
 - **Update Library** rebuilds the index from `INGEST_SOURCE_PATH` each time (documents removed from the folder drop out of search).
 
 - Index data is stored under `./data/` by default (configurable via `DATA_DIR`).
-- Supported files: `.txt`, `.md`, `.pdf`.
+- Supported files: `.txt`, `.md`, `.pdf`, `.docx`.
 
