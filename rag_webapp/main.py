@@ -26,8 +26,17 @@ from rag_webapp.vllm_docker import StartConfig, container_running, docker_availa
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="ChatRTX Web", version="0.2.0")
 settings = get_settings()
+# With auth on, don't publish the API schema at all (it is behind auth anyway,
+# but there is no reason to serve it).
+_docs_enabled = not settings.app_password
+app = FastAPI(
+    title="ChatRTX Web",
+    version="0.2.0",
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
+)
 _ingest_lock = threading.Lock()
 _model_lock = threading.Lock()
 
@@ -45,9 +54,11 @@ def _authorized(header: str | None) -> bool:
         user, _, pw = base64.b64decode(header[6:]).decode("utf-8").partition(":")
     except Exception:  # noqa: BLE001
         return False
-    return secrets.compare_digest(user.encode(), settings.app_username.encode()) and secrets.compare_digest(
-        pw.encode(), settings.app_password.encode()
-    )
+    # Evaluate both comparisons (no short-circuit) so timing doesn't reveal
+    # whether the username alone was right.
+    user_ok = secrets.compare_digest(user.encode(), settings.app_username.encode())
+    pw_ok = secrets.compare_digest(pw.encode(), settings.app_password.encode())
+    return user_ok & pw_ok
 
 
 @app.middleware("http")
@@ -144,10 +155,12 @@ def _active_model() -> str:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
+    # (request, name, context) works on Starlette 0.29+; the old (name, {"request": ...})
+    # form was removed in Starlette 1.0 and made "/" return 500.
     return templates.TemplateResponse(
+        request,
         "index.html",
         {
-            "request": request,
             "app_title": settings.app_title,
             "llm_model": _active_model(),
             "data_label": "Managed by server",
@@ -176,17 +189,22 @@ async def api_ingest() -> IngestResponse:
             docs = await run_in_threadpool(load_path, settings.ingest_source_path)
         except Exception:  # noqa: BLE001
             # Don't leak filesystem paths back to the browser.
+            logger.exception("Could not read ingestion source")
             raise HTTPException(status_code=500, detail="Ingestion source is not available on the server.") from None
 
         # Embedding + FAISS work is CPU/GPU-bound; keep it off the event loop.
-        res = await run_in_threadpool(
-            ingest_docs,
-            store=store,
-            embed_model=settings.embed_model,
-            docs=docs,
-            chunk_size=settings.chunk_size,
-            chunk_overlap=settings.chunk_overlap,
-        )
+        try:
+            res = await run_in_threadpool(
+                ingest_docs,
+                store=store,
+                embed_model=settings.embed_model,
+                docs=docs,
+                chunk_size=settings.chunk_size,
+                chunk_overlap=settings.chunk_overlap,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Indexing failed")
+            raise HTTPException(status_code=500, detail="Indexing failed. Check server logs.") from None
     finally:
         _ingest_lock.release()
     return IngestResponse(files_seen=res.files_seen, chunks_added=res.chunks_added)
@@ -200,7 +218,13 @@ async def api_index_stats() -> IndexStatsResponse:
 
 @app.post("/api/index/clear", response_model=IndexClearResponse)
 async def api_index_clear() -> IndexClearResponse:
-    store.clear()
+    # Don't race a running ingest (it would re-save the index right after).
+    if not _ingest_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="An ingestion is already running.")
+    try:
+        store.clear()
+    finally:
+        _ingest_lock.release()
     return IndexClearResponse(ok=True)
 
 
@@ -213,6 +237,12 @@ async def api_chat(req: ChatRequest) -> ChatResponse:
     hits = await run_in_threadpool(
         retrieve, store=store, embed_model=settings.embed_model, query=q, top_k=settings.top_k
     )
+    if not hits:
+        # Nothing indexed: say so instead of asking the model to answer from no context.
+        return ChatResponse(
+            answer="The document library is empty. Click \u201cUpdate Library\u201d to index documents first.",
+            citations=[],
+        )
     chunks = [
         RetrievedChunk(source_path=h.meta.source_path, page=h.meta.page, text=h.meta.text)
         for h in hits
@@ -291,7 +321,9 @@ async def api_models_progress() -> ModelProgressResponse:
     if not docker_available():
         return ModelProgressResponse(ok=False, active_model=active, stage="unknown")
 
-    logs = tail_container_logs(settings.vllm_container_name, tail=800)
+    # docker CLI calls block (up to their timeouts); keep them off the event loop.
+    logs = await run_in_threadpool(tail_container_logs, settings.vllm_container_name, 800)
+    running = await run_in_threadpool(container_running, settings.vllm_container_name)
     p = parse_download_progress(logs)
     failure = classify_failure(logs)
 
@@ -316,11 +348,11 @@ async def api_models_progress() -> ModelProgressResponse:
         )
 
     # If the container is not running and we can classify a failure, surface it.
-    if not container_running(settings.vllm_container_name) and failure:
+    if not running and failure:
         return ModelProgressResponse(ok=False, active_model=active, stage="unknown", error=failure)
 
     # Otherwise, if the container is running but not serving yet, it's starting.
-    if container_running(settings.vllm_container_name):
+    if running:
         return ModelProgressResponse(ok=True, active_model=active, stage="starting")
 
     return ModelProgressResponse(ok=False, active_model=active, stage="unknown")
@@ -344,35 +376,60 @@ async def api_models_select(req: ModelSelectRequest) -> ModelSelectResponse:
 
     # Restart vLLM container; this will download the model into the shared HF cache if needed.
     # Runs in a worker thread: it can block for minutes (GPU wait + docker run).
+    previous = _active_model()
     try:
-        # Persist user choice server-side.
+        try:
+            await run_in_threadpool(start_vllm_openai, _start_config(model))
+        except Exception:
+            logger.exception("Failed to start vLLM container")
+            # Only one model fits on the GPU, so the old container is removed
+            # before the new one starts. Put the previous model back (it is
+            # server-chosen: the configured default or an earlier allowlisted pick).
+            restored = await run_in_threadpool(_restore_model, previous)
+            # Don't leak host details.
+            return ModelSelectResponse(
+                ok=False,
+                active_model=previous,
+                ready=False,
+                message=(
+                    "Failed to start the model; the previous model is being restarted."
+                    if restored
+                    else "Failed to start the model, and the previous model could not be restarted. "
+                    "Check server logs."
+                ),
+            )
+        # Persist the choice only once the container has actually been started.
         set_active_model(settings.data_dir, model)
-        await run_in_threadpool(
-            start_vllm_openai,
-            StartConfig(
-                name=settings.vllm_container_name,
-                port=settings.vllm_port,
-                hf_cache_dir=settings.hf_cache_dir,
-                model=model,
-                gpu_memory_utilization=settings.vllm_gpu_memory_utilization,
-                max_model_len=settings.vllm_max_model_len,
-                max_num_seqs=settings.vllm_max_num_seqs,
-                hf_token=settings.hf_token,
-                switch_wait_for_gpu_mem_below_mib=settings.vllm_switch_wait_for_gpu_mem_below_mib,
-                switch_wait_timeout_s=settings.vllm_switch_wait_timeout_s,
-                bind_host=settings.vllm_bind_host,
-            ),
-        )
-    except Exception:
-        logger.exception("Failed to start vLLM container")
-        # Don't leak host details.
-        return ModelSelectResponse(
-            ok=False,
-            active_model=model,
-            ready=False,
-            message="Failed to start the model. Check server logs.",
-        )
     finally:
         _model_lock.release()
 
     return ModelSelectResponse(ok=True, active_model=model, ready=False, message="Model is starting…")
+
+
+def _start_config(model: str) -> StartConfig:
+    return StartConfig(
+        name=settings.vllm_container_name,
+        port=settings.vllm_port,
+        hf_cache_dir=settings.hf_cache_dir,
+        model=model,
+        gpu_memory_utilization=settings.vllm_gpu_memory_utilization,
+        max_model_len=settings.vllm_max_model_len,
+        max_num_seqs=settings.vllm_max_num_seqs,
+        hf_token=settings.hf_token,
+        switch_wait_for_gpu_mem_below_mib=settings.vllm_switch_wait_for_gpu_mem_below_mib,
+        switch_wait_timeout_s=settings.vllm_switch_wait_timeout_s,
+        bind_host=settings.vllm_bind_host,
+    )
+
+
+def _restore_model(previous: str) -> bool:
+    """After a failed switch, make sure the previous model is serving again."""
+    if container_running(settings.vllm_container_name):
+        # The switch failed before the old container was touched.
+        return True
+    try:
+        start_vllm_openai(_start_config(previous))
+        return True
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to restart the previous model")
+        return False

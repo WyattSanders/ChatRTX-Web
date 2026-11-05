@@ -1,10 +1,34 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
 import time
+
+
+# The image is fixed here, never taken from settings or requests.
+VLLM_IMAGE = "vllm/vllm-openai:latest"
+
+# Docker's own container-name rule; also guarantees the name can't start with "-"
+# and be parsed as a CLI option.
+_CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
+# Hugging Face repo id ("name" or "org/name"). Defence in depth behind the
+# MODEL_CATALOG allowlist: no leading "-", no whitespace, no path traversal.
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}(/[A-Za-z0-9][A-Za-z0-9._-]{0,95})?$")
+
+
+def validate_container_name(name: str) -> str:
+    if not isinstance(name, str) or not _CONTAINER_NAME_RE.fullmatch(name):
+        raise ValueError("invalid container name")
+    return name
+
+
+def validate_model_id(model: str) -> str:
+    if not isinstance(model, str) or not _MODEL_ID_RE.fullmatch(model) or ".." in model:
+        raise ValueError("invalid model id")
+    return model
 
 
 def _has_docker() -> bool:
@@ -70,8 +94,12 @@ def _run(args: list[str], timeout_s: int = 60, env: dict[str, str] | None = None
 def remove_container(name: str, wait_for_gpu_mem_below_mib: int | None = None, timeout_s: int = 45) -> None:
     if not _has_docker():
         return
-    # ignore errors (container may not exist)
-    subprocess.run(["docker", "rm", "-f", name], check=False, capture_output=True, text=True)
+    validate_container_name(name)
+    # ignore errors (container may not exist), but never hang the switch forever
+    try:
+        subprocess.run(["docker", "rm", "-f", name], check=False, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        pass
     if wait_for_gpu_mem_below_mib is not None:
         _wait_for_gpu_mem_below(wait_for_gpu_mem_below_mib, timeout_s=timeout_s)
 
@@ -99,7 +127,12 @@ def start_vllm_openai(cfg: StartConfig) -> None:
     if not _has_docker():
         raise RuntimeError("docker is not available")
 
-    # fixed command; model is validated upstream against allowlist
+    # fixed command; model is validated upstream against the allowlist. Validate
+    # again *before* touching the running container so a bad value can't take
+    # down the current model or reach docker's argv.
+    validate_container_name(cfg.name)
+    validate_model_id(cfg.model)
+
     remove_container(
         cfg.name,
         wait_for_gpu_mem_below_mib=cfg.switch_wait_for_gpu_mem_below_mib,
@@ -130,7 +163,7 @@ def start_vllm_openai(cfg: StartConfig) -> None:
         args += ["-e", "HF_TOKEN", "-e", "HUGGING_FACE_HUB_TOKEN"]
 
     args += [
-            "vllm/vllm-openai:latest",
+            VLLM_IMAGE,
             "--model",
             cfg.model,
             "--host",
@@ -152,12 +185,16 @@ def start_vllm_openai(cfg: StartConfig) -> None:
 def container_running(name: str) -> bool:
     if not _has_docker():
         return False
-    r = subprocess.run(
-        ["docker", "inspect", "-f", "{{.State.Running}}", name],
-        check=False,
-        text=True,
-        capture_output=True,
-        timeout=5,
-    )
+    validate_container_name(name)
+    try:
+        r = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Running}}", name],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        return False
     return (r.stdout or "").strip().lower() == "true"
 
