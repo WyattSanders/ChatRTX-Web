@@ -213,3 +213,7 @@ data/*.faiss
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Runtime state (active model selection)
+data/state.json
+hf-cache/
