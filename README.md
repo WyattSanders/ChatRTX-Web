@@ -15,6 +15,9 @@ This is a small **self-hosted RAG web app** for Linux servers.
   - The web UI can “Download & Activate” a model by restarting the configured vLLM docker container.
   - Note: larger models (e.g. 12B) may require more VRAM and/or quantized variants to start successfully.
 - The web UI **does not display** server filesystem paths or LLM endpoint URLs.
+- **Authentication**: set `APP_PASSWORD` (and optionally `APP_USERNAME`, default `admin`) to require HTTP Basic auth on every page and API call. Without it, anyone who can reach the port can chat over your documents, re-ingest, and switch models. Put it behind HTTPS (reverse proxy) if exposed beyond your LAN.
+- **vLLM is bound to loopback**: the managed container publishes its port on `127.0.0.1` only (vLLM itself has no auth). Override with `VLLM_BIND_HOST` if you really need remote access.
+- The Hugging Face token is passed to Docker through the environment, not on the command line, so it doesn't appear in `ps` output.
 
 ## Quick start
 
@@ -117,7 +120,16 @@ Click **Update Library** in the UI.
 
 Note: ingestion runs against the server-configured `INGEST_SOURCE_PATH`.
 
+## Tests
+
+```bash
+pip install pytest
+python -m pytest -q tests   # offline; sentence-transformers is stubbed
+```
+
 ## Notes
+
+- **Update Library** rebuilds the index from `INGEST_SOURCE_PATH` each time (documents removed from the folder drop out of search).
 
 - Index data is stored under `./data/` by default (configurable via `DATA_DIR`).
 - Supported files: `.txt`, `.md`, `.pdf`.

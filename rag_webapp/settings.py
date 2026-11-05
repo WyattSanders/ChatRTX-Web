@@ -32,6 +32,9 @@ class Settings:
     hf_token: str | None
     vllm_switch_wait_for_gpu_mem_below_mib: int
     vllm_switch_wait_timeout_s: int
+    vllm_bind_host: str
+    app_username: str
+    app_password: str
 
     chunk_size: int
     chunk_overlap: int
@@ -75,13 +78,17 @@ def get_settings() -> Settings:
         model_catalog=_csv("MODEL_CATALOG"),
         vllm_container_name=(os.getenv("VLLM_CONTAINER_NAME") or "vllm-openai"),
         vllm_port=vllm_port,
-        hf_cache_dir=(os.getenv("HF_CACHE_DIR") or "./hf-cache"),
+        # docker -v needs an absolute host path; resolve relative values.
+        hf_cache_dir=os.path.abspath(os.getenv("HF_CACHE_DIR") or "./hf-cache"),
         hf_token=(os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN") or "").strip() or None,
         vllm_gpu_memory_utilization=_float("VLLM_GPU_MEMORY_UTILIZATION", 0.95),
         vllm_max_model_len=_int("VLLM_MAX_MODEL_LEN", 2048),
         vllm_max_num_seqs=_int("VLLM_MAX_NUM_SEQS", 1),
         vllm_switch_wait_for_gpu_mem_below_mib=_int("VLLM_SWITCH_WAIT_FOR_GPU_MEM_BELOW_MIB", 1500),
         vllm_switch_wait_timeout_s=_int("VLLM_SWITCH_WAIT_TIMEOUT_S", 45),
+        vllm_bind_host=(os.getenv("VLLM_BIND_HOST") or "127.0.0.1"),
+        app_username=(os.getenv("APP_USERNAME") or "admin"),
+        app_password=(os.getenv("APP_PASSWORD") or ""),
         chunk_size=_int("CHUNK_SIZE", 900),
         chunk_overlap=_int("CHUNK_OVERLAP", 150),
         top_k=_int("TOP_K", 5),

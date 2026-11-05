@@ -53,24 +53,18 @@ def ingest(
         # If there is no data, keep any existing index.
         return IngestResult(files_seen=len({d.source_path for d in docs}), chunks_added=0)
 
+    # De-duplicate identical chunk ids (same file/page/span).
+    chunks = list({c.id: c for c in chunks}.values())
+
     vecs = embed_texts(embed_model, [c.text for c in chunks])
     vecs = store.normalize(vecs)
 
-    loaded = store.load()
-    if loaded is None:
-        index = store.new_index(vecs.shape[1])
-        metas: list[ChunkMeta] = []
-    else:
-        index, metas = loaded
-
-    # If embedding dim changed, start fresh.
-    if index.d != vecs.shape[1]:
-        index = store.new_index(vecs.shape[1])
-        metas = []
-
+    # `docs` is always the full ingestion source, so rebuild the index rather
+    # than appending: appending re-added every chunk on each "Update Library"
+    # click (duplicate hits crowding out top_k) and never dropped deleted files.
+    index = store.new_index(vecs.shape[1])
     index.add(vecs.astype("float32"))
-    metas.extend(chunks)
-    store.save(index, metas)
+    store.save(index, chunks)
     return IngestResult(files_seen=len({d.source_path for d in docs}), chunks_added=len(chunks))
 
 

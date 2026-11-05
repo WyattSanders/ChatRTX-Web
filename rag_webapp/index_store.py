@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 from typing import Iterable
 
@@ -59,8 +60,12 @@ class IndexStore:
         return idx, metas
 
     def save(self, index: faiss.Index, metas: Iterable[ChunkMeta]) -> None:
-        faiss.write_index(index, str(self.index_path))
-        with self.meta_path.open("w", encoding="utf-8") as f:
+        # Write to temp files and rename so a concurrent load() never sees a
+        # new index paired with old metadata (or a half-written file).
+        tmp_index = self.index_path.with_suffix(".faiss.tmp")
+        tmp_meta = self.meta_path.with_suffix(".jsonl.tmp")
+        faiss.write_index(index, str(tmp_index))
+        with tmp_meta.open("w", encoding="utf-8") as f:
             for m in metas:
                 f.write(
                     json.dumps(
@@ -76,6 +81,8 @@ class IndexStore:
                     )
                     + "\n"
                 )
+        os.replace(tmp_meta, self.meta_path)
+        os.replace(tmp_index, self.index_path)
 
     @staticmethod
     def new_index(embedding_dim: int) -> faiss.Index:

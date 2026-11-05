@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -55,13 +56,14 @@ def _wait_for_gpu_mem_below(target_mib: int, timeout_s: int) -> bool:
     return False
 
 
-def _run(args: list[str], timeout_s: int = 60) -> subprocess.CompletedProcess[str]:
+def _run(args: list[str], timeout_s: int = 60, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         args,
         check=True,
         text=True,
         capture_output=True,
         timeout=timeout_s,
+        env=env,
     )
 
 
@@ -88,6 +90,9 @@ class StartConfig:
     # Keeps us from OOMing due to old container teardown still in progress.
     switch_wait_for_gpu_mem_below_mib: int = 1500
     switch_wait_timeout_s: int = 45
+    # Host interface for the published vLLM port. vLLM has no auth, so keep it
+    # on loopback unless another host really needs direct access.
+    bind_host: str = "127.0.0.1"
 
 
 def start_vllm_openai(cfg: StartConfig) -> None:
@@ -111,14 +116,18 @@ def start_vllm_openai(cfg: StartConfig) -> None:
             "all",
             "--ipc=host",
             "-p",
-            f"{cfg.port}:8000",
+            f"{cfg.bind_host}:{cfg.port}:8000",
             "-v",
-            f"{cfg.hf_cache_dir}:/root/.cache/huggingface",
+            f"{os.path.abspath(cfg.hf_cache_dir)}:/root/.cache/huggingface",
     ]
 
     # For gated/private models. Either env var works; we set both for compatibility.
+    # Pass names only (`-e NAME`) so docker reads the values from our env: the
+    # token never appears in the process list / argv.
+    env = None
     if cfg.hf_token:
-        args += ["-e", f"HF_TOKEN={cfg.hf_token}", "-e", f"HUGGING_FACE_HUB_TOKEN={cfg.hf_token}"]
+        env = {**os.environ, "HF_TOKEN": cfg.hf_token, "HUGGING_FACE_HUB_TOKEN": cfg.hf_token}
+        args += ["-e", "HF_TOKEN", "-e", "HUGGING_FACE_HUB_TOKEN"]
 
     args += [
             "vllm/vllm-openai:latest",
@@ -136,7 +145,8 @@ def start_vllm_openai(cfg: StartConfig) -> None:
         str(cfg.max_num_seqs),
     ]
 
-    _run(args, timeout_s=120)
+    os.makedirs(cfg.hf_cache_dir, exist_ok=True)
+    _run(args, timeout_s=120, env=env)
 
 
 def container_running(name: str) -> bool:

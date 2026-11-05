@@ -12,6 +12,8 @@ VLLM_PORT="${VLLM_PORT:-8001}"
 VLLM_CONTAINER_NAME="${VLLM_CONTAINER_NAME:-vllm-openai}"
 HF_CACHE_DIR="${HF_CACHE_DIR:-${PROJECT_DIR}/hf-cache}"
 HF_TOKEN="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
+# Exported so `docker run -e NAME` picks the value up without it showing in `ps`.
+export HF_TOKEN HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
 VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-2048}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.95}"
 VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"
@@ -49,10 +51,9 @@ fi
 docker run -d --name "${VLLM_CONTAINER_NAME}" \
   --gpus all \
   --ipc=host \
-  -p "${VLLM_PORT}:8000" \
+  -p "${VLLM_BIND_HOST:-127.0.0.1}:${VLLM_PORT}:8000" \
   -v "${HF_CACHE_DIR}:/root/.cache/huggingface" \
-  ${HF_TOKEN:+-e HF_TOKEN="${HF_TOKEN}"} \
-  ${HF_TOKEN:+-e HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"} \
+  ${HF_TOKEN:+-e HF_TOKEN -e HUGGING_FACE_HUB_TOKEN} \
   vllm/vllm-openai:latest \
   --model "${MODEL}" \
   --host 0.0.0.0 --port 8000 \

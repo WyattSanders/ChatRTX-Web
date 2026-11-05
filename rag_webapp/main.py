@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import base64
+import logging
+import secrets
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
@@ -19,9 +24,43 @@ from rag_webapp.state import get_active_model, set_active_model
 from rag_webapp.model_progress import classify_failure, parse_download_progress, tail_container_logs
 from rag_webapp.vllm_docker import StartConfig, container_running, docker_available, start_vllm_openai
 
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="ChatRTX Web", version="0.2.0")
 settings = get_settings()
+_ingest_lock = threading.Lock()
+_model_lock = threading.Lock()
+
+if not settings.app_password:
+    logger.warning(
+        "APP_PASSWORD is not set: the web UI and API (ingest, chat over your documents, "
+        "model switching) are open to anyone who can reach this port."
+    )
+
+
+def _authorized(header: str | None) -> bool:
+    if not header or not header.startswith("Basic "):
+        return False
+    try:
+        user, _, pw = base64.b64decode(header[6:]).decode("utf-8").partition(":")
+    except Exception:  # noqa: BLE001
+        return False
+    return secrets.compare_digest(user.encode(), settings.app_username.encode()) and secrets.compare_digest(
+        pw.encode(), settings.app_password.encode()
+    )
+
+
+@app.middleware("http")
+async def basic_auth(request: Request, call_next):
+    """Optional HTTP Basic auth for every route, enabled by setting APP_PASSWORD."""
+    if settings.app_password and not _authorized(request.headers.get("authorization")):
+        return Response(
+            status_code=401,
+            content="Authentication required",
+            headers={"WWW-Authenticate": 'Basic realm="ChatRTX Web"'},
+        )
+    return await call_next(request)
+
 store = IndexStore(settings.data_dir)
 llm = OpenAICompatLLM(
     base_url=settings.llm_base_url,
@@ -120,19 +159,26 @@ async def api_ingest() -> IngestResponse:
     if not settings.ingest_source_path:
         raise HTTPException(status_code=503, detail="Ingestion is not configured on this server.")
 
+    if not _ingest_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="An ingestion is already running.")
     try:
-        docs = load_path(settings.ingest_source_path)
-    except Exception:  # noqa: BLE001
-        # Don't leak filesystem paths back to the browser.
-        raise HTTPException(status_code=500, detail="Ingestion source is not available on the server.") from None
+        try:
+            docs = await run_in_threadpool(load_path, settings.ingest_source_path)
+        except Exception:  # noqa: BLE001
+            # Don't leak filesystem paths back to the browser.
+            raise HTTPException(status_code=500, detail="Ingestion source is not available on the server.") from None
 
-    res = ingest_docs(
-        store=store,
-        embed_model=settings.embed_model,
-        docs=docs,
-        chunk_size=settings.chunk_size,
-        chunk_overlap=settings.chunk_overlap,
-    )
+        # Embedding + FAISS work is CPU/GPU-bound; keep it off the event loop.
+        res = await run_in_threadpool(
+            ingest_docs,
+            store=store,
+            embed_model=settings.embed_model,
+            docs=docs,
+            chunk_size=settings.chunk_size,
+            chunk_overlap=settings.chunk_overlap,
+        )
+    finally:
+        _ingest_lock.release()
     return IngestResponse(files_seen=res.files_seen, chunks_added=res.chunks_added)
 
 
@@ -142,7 +188,9 @@ async def api_chat(req: ChatRequest) -> ChatResponse:
     if not q:
         raise HTTPException(status_code=400, detail="question is required")
 
-    hits = retrieve(store=store, embed_model=settings.embed_model, query=q, top_k=settings.top_k)
+    hits = await run_in_threadpool(
+        retrieve, store=store, embed_model=settings.embed_model, query=q, top_k=settings.top_k
+    )
     chunks = [
         RetrievedChunk(source_path=h.meta.source_path, page=h.meta.page, text=h.meta.text)
         for h in hits
@@ -205,8 +253,7 @@ async def api_models_status() -> ModelStatusResponse:
     active = _active_model()
     try:
         models = await llm.list_models()
-        served = models[0] if models else ""
-        ready = bool(served) and (served == active)
+        ready = active in models
         return ModelStatusResponse(ok=True, active_model=active, ready=ready)
     except Exception:
         return ModelStatusResponse(ok=False, active_model=active, ready=False)
@@ -229,8 +276,7 @@ async def api_models_progress() -> ModelProgressResponse:
     # If the model is served and matches active, we're ready.
     try:
         models = await llm.list_models()
-        served = models[0] if models else ""
-        if served and served == active:
+        if active in models:
             return ModelProgressResponse(ok=True, active_model=active, stage="ready")
     except Exception:
         pass
@@ -271,12 +317,16 @@ async def api_models_select(req: ModelSelectRequest) -> ModelSelectResponse:
     if model not in settings.model_catalog:
         raise HTTPException(status_code=400, detail="model is not allowed")
 
-    # Persist user choice server-side.
-    set_active_model(settings.data_dir, model)
+    if not _model_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A model switch is already in progress.")
 
     # Restart vLLM container; this will download the model into the shared HF cache if needed.
+    # Runs in a worker thread: it can block for minutes (GPU wait + docker run).
     try:
-        start_vllm_openai(
+        # Persist user choice server-side.
+        set_active_model(settings.data_dir, model)
+        await run_in_threadpool(
+            start_vllm_openai,
             StartConfig(
                 name=settings.vllm_container_name,
                 port=settings.vllm_port,
@@ -288,9 +338,11 @@ async def api_models_select(req: ModelSelectRequest) -> ModelSelectResponse:
                 hf_token=settings.hf_token,
                 switch_wait_for_gpu_mem_below_mib=settings.vllm_switch_wait_for_gpu_mem_below_mib,
                 switch_wait_timeout_s=settings.vllm_switch_wait_timeout_s,
-            )
+                bind_host=settings.vllm_bind_host,
+            ),
         )
     except Exception:
+        logger.exception("Failed to start vLLM container")
         # Don't leak host details.
         return ModelSelectResponse(
             ok=False,
@@ -298,5 +350,7 @@ async def api_models_select(req: ModelSelectRequest) -> ModelSelectResponse:
             ready=False,
             message="Failed to start the model. Check server logs.",
         )
+    finally:
+        _model_lock.release()
 
     return ModelSelectResponse(ok=True, active_model=model, ready=False, message="Model is starting…")
